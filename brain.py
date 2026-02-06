@@ -33,13 +33,34 @@ class FamilyMemory:
     def _init_db(self):
         conn = self._get_conn()
         cursor = conn.cursor()
-        # Tabel Anggota
+        
+        # Tabel Anggota Keluarga (Basic)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS family_members (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT, name TEXT, birthdate TEXT
+                role TEXT,
+                name TEXT,
+                birthdate TEXT
             )
         ''')
+        
+        # --- MIGRATION: Tambah Kolom Baru (Jika belum ada) ---
+        # Kita check apakah kolom gender/hobbies sudah ada
+        cursor.execute("PRAGMA table_info(family_members)")
+        columns = [info[1] for info in cursor.fetchall()]
+        
+        if 'gender' not in columns:
+            print("[DB] Migrasi: Menambah kolom gender...")
+            cursor.execute("ALTER TABLE family_members ADD COLUMN gender TEXT")
+            
+        if 'hobbies' not in columns:
+            print("[DB] Migrasi: Menambah kolom hobbies...")
+            cursor.execute("ALTER TABLE family_members ADD COLUMN hobbies TEXT")
+            
+        if 'notes' not in columns:
+            print("[DB] Migrasi: Menambah kolom notes TEXT")
+            cursor.execute("ALTER TABLE family_members ADD COLUMN notes TEXT")
+
         # Tabel Keuangan
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS finance_log (
@@ -50,15 +71,34 @@ class FamilyMemory:
         conn.commit()
         conn.close()
 
-    def add_member(self, role, name, birthdate):
+    def add_member(self, role, name, birthdate="0000-00-00", gender="-", hobbies="-", notes="-"):
         try:
             conn = self._get_conn()
             cursor = conn.cursor()
-            cursor.execute("INSERT INTO family_members (role, name, birthdate) VALUES (?, ?, ?)", 
-                           (role, name, birthdate))
+            
+            # Cek apakah nama ini sudah ada? (Update jika ada)
+            cursor.execute("SELECT id FROM family_members WHERE name = ? AND role = ?", (name, role))
+            data = cursor.fetchone()
+            
+            if data:
+                # Update Existing
+                cursor.execute("""
+                    UPDATE family_members 
+                    SET birthdate=?, gender=?, hobbies=?, notes=?
+                    WHERE id=?
+                """, (birthdate, gender, hobbies, notes, data[0]))
+                action = "diperbarui"
+            else:
+                # Insert New
+                cursor.execute("""
+                    INSERT INTO family_members (role, name, birthdate, gender, hobbies, notes) 
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (role, name, birthdate, gender, hobbies, notes))
+                action = "tersimpan"
+                
             conn.commit()
             conn.close()
-            return f"Data {role} bernama {name} tersimpan."
+            return f"Data {role} atas nama {name} berhasil {action} (Gender: {gender}, Hobi: {hobbies})."
         except Exception as e:
             return f"Gagal simpan DB: {e}"
 
@@ -78,7 +118,7 @@ class FamilyMemory:
     def get_context_string(self):
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT role, name, birthdate FROM family_members")
+        cursor.execute("SELECT role, name, birthdate, gender, hobbies, notes FROM family_members")
         rows = cursor.fetchall()
         conn.close()
         
@@ -215,8 +255,13 @@ Jawaban (sebagai Hana):"""
                              break
                              
                 if name:
-                    self.memory.add_member(role, name, "0000-00-00")
-                    return f"Salam kenal {role} {name}, data sudah tersimpan.", []
+                    # Infer Gender sederhana dari Role
+                    gender = "-"
+                    if role in ["Ayah", "Suami", "Putra", "Kakek"]: gender = "Laki-laki"
+                    elif role in ["Ibu", "Istri", "Putri", "Nenek"]: gender = "Perempuan"
+                    
+                    self.memory.add_member(role, name, birthdate="0000-00-00", gender=gender, hobbies="-")
+                    return f"Salam kenal {role} {name}, data lengkapmu sudah saya simpan.", []
             except Exception as e:
                 print(f"Error parsing manual: {e}")
                 pass
