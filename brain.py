@@ -5,7 +5,7 @@ import subprocess
 import sqlite3
 
 # --- KONFIGURASI MODEL & CONSTANTS ---
-OLLAMA_MODEL = "tinyllama"  # atau "phi3:mini"
+OLLAMA_MODEL = "gemma3:270m"  # Model Gemma 3 Nano (270M)
 SYSTEM_PROMPT = """
 ### ROLE
 Kamu adalah "Hana", Digital Asisten Simple Untuk Keluarga Muslim di dalam CACube.
@@ -133,6 +133,8 @@ class HanaBrain:
     def _mock_fallback(self, prompt):
         # Fallback sederhana untuk demo tanpa Ollama
         prompt = prompt.lower()
+        if "assalam" in prompt or "salam" in prompt:
+            return "Wa'alaikumussalam, semoga hari Anda penuh berkah."
         if "siapa" in prompt:
             return "Saya Hana (Mode Demo), asisten keluarga muslim."
         if "lampu" in prompt:
