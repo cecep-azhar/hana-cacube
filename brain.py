@@ -8,7 +8,7 @@ import sqlite3
 OLLAMA_MODEL = "gemma3:270m"  # Model Gemma 3 Nano (270M)
 SYSTEM_PROMPT = """
 ### ROLE
-Kamu adalah "Hana", Digital Asisten Simple Untuk Keluarga Muslim di dalam CACube.
+Kamu adalah "Hana", Digital Asisten Simple Wanita Shalihah Untuk Keluarga Muslim di dalam CACube.
 Karakter: Ramah, sabar, cerdas, religius namun modern.
 Bahasa: Bahasa Indonesia. Jawab SINGKAT (2-3 kalimat).
 Jika user minta kendali hardware, akhiri dengan tag: [ACTION:LIGHT_ON], [ACTION:LIGHT_OFF], dll.
@@ -101,43 +101,49 @@ class HanaBrain:
         self.memory = FamilyMemory()
         
     def _ask_ollama(self, prompt, context_text):
-        # Menggunakan subprocess untuk memanggil Ollama secara lokal
-        full_prompt = f"System: {SYSTEM_PROMPT}\nContext: {context_text}\nUser: {prompt}\nAssistant:"
+        # Menggunakan subprocess dengan List Argument (shell=False)
+        # Ini menghindari masalah 'quoting' yang sering error di Windows Command Prompt/PowerShell
+        
+        # System prompt simple saja untuk model kecil
+        input_text = f"System: {SYSTEM_PROMPT}\nContext: {context_text}\nUser: {prompt}\nAnswer:"
+        
+        print(f"[Brain] Sending to Ollama ({OLLAMA_MODEL})...")
         
         try:
-            # Mengirim prompt via STDIN agar aman dari isu quote/newline di shell
-            # Command: ollama run modelname
-            command = f'ollama run {OLLAMA_MODEL}'
-            
-            # Eksekusi dengan timeout
+            # shell=False adalah kunci agar Windows tidak bingung dengan spasi/tanda kutip
+            # Kita panggil executable 'ollama' langsung
             result = subprocess.run(
-                command, 
-                input=full_prompt.encode('utf-8'), 
-                shell=True, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE, 
+                ["ollama", "run", OLLAMA_MODEL, input_text],
+                capture_output=True,
+                text=True, # Otomatis decode string
+                encoding='utf-8', # Force UTF-8
+                errors='replace', # Jangan crash kalau ada karakter aneh
                 timeout=120
             )
             
             if result.returncode != 0:
-                error_msg = result.stderr.decode('utf-8')
-                return f"Error Ollama ({result.returncode}): {error_msg}"
+                print(f"[Error Ollama] Exit Code {result.returncode}")
+                print(f"[Error Stderr] {result.stderr}")
+                return "Maaf, ada masalah internal dengan Ollama."
+
+            response = result.stdout.strip()
+            
+            # Debugging: Cek apakah kosong
+            if not response:
+                print(f"[Warn] Response kosong. Stderr: {result.stderr}")
+                return "..." # Jangan return empty string string agar TTS tidak error
                 
-            return result.stdout.decode('utf-8').strip()
+            return response
+                 
         except subprocess.TimeoutExpired:
-            print("[Info] Ollama timeout (Hana menunggu 120 detik tapi tidak ada respon). Beralih ke Mock.")
-            return self._mock_fallback(prompt)
+             print("[Error] Timeout 120s.")
+             return "Maaf, saya terlalu lama berpikir."
         except FileNotFoundError:
-            return self._mock_fallback(prompt)
-        except subprocess.CalledProcessError as e:
-            output = e.output.decode()
-            # Jika command not found (di windows kadang beda behavior), switch ke mock
-            if "not recognized" in output or "not found" in output or "command not found" in output:
-                print(f"[Info] Ollama tidak ditemukan, beralih ke Mode Demo Mock.")
-                return self._mock_fallback(prompt)
-            return f"Maaf, otak saya (Ollama) sedang error: {output}"
+             print("[Error] Executable 'ollama' tidak ditemukan di PATH.")
+             return self._mock_fallback(prompt)
         except Exception as e:
-            return f"Error sistem: {str(e)}"
+             print(f"[Error Subprocess] {e}")
+             return f"Maaf, error sistem: {str(e)}"
 
     def _mock_fallback(self, prompt):
         # Fallback sederhana untuk demo tanpa Ollama
