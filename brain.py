@@ -105,18 +105,27 @@ class HanaBrain:
         full_prompt = f"System: {SYSTEM_PROMPT}\nContext: {context_text}\nUser: {prompt}\nAssistant:"
         
         try:
-            # Escape quote untuk command line argument yang aman
-            safe_prompt = full_prompt.replace('"', '\\"')
+            # Mengirim prompt via STDIN agar aman dari isu quote/newline di shell
+            # Command: ollama run modelname
+            command = f'ollama run {OLLAMA_MODEL}'
             
-            # Command ollama run
-            command = f'ollama run {OLLAMA_MODEL} "{safe_prompt}"'
+            # Eksekusi dengan timeout
+            result = subprocess.run(
+                command, 
+                input=full_prompt.encode('utf-8'), 
+                shell=True, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                timeout=120
+            )
             
-            # Eksekusi dengan timeout agar tidak hang
-            # stderr=subprocess.STDOUT menggabungkan error ke output untuk debugging
-            result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, timeout=5)
-            return result.decode('utf-8').strip()
+            if result.returncode != 0:
+                error_msg = result.stderr.decode('utf-8')
+                return f"Error Ollama ({result.returncode}): {error_msg}"
+                
+            return result.stdout.decode('utf-8').strip()
         except subprocess.TimeoutExpired:
-            print("[Info] Ollama timeout. Beralih ke Mock.")
+            print("[Info] Ollama timeout (Hana menunggu 120 detik tapi tidak ada respon). Beralih ke Mock.")
             return self._mock_fallback(prompt)
         except FileNotFoundError:
             return self._mock_fallback(prompt)
