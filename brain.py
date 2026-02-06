@@ -172,6 +172,55 @@ Jawaban (sebagai Hana):"""
         
         # --- LOGIC MANUAL (Cepat & Tanpa AI) ---
         
+        # 0. Parsing Identitas (Ayah/Ibu)
+        # Mendukung: "Saya suami bernama Cecep" atau "Saya Ibu namanya Rini"
+        if "bernama" in text_lower or "namanya" in text_lower or "nama saya" in text_lower:
+            try:
+                role = None
+                name = None
+                
+                # Mapping kata kunci ke Role Database
+                role_map = {
+                    "ayah": "Ayah", "suami": "Ayah", "bapak": "Ayah",
+                    "ibu": "Ibu", "istri": "Ibu", "bunda": "Ibu", "mama": "Ibu",
+                    "anak": "Anak", "putra": "Anak", "putri": "Anak"
+                }
+
+                # 1. Tentukan Role
+                # Prioritas: Kata role yang muncul SETELAH kata "saya" (e.g. "Saya Suami...")
+                # Jika tidak ada "saya", ambil role pertama yang ketemu.
+                words = text_lower.split()
+                
+                detected_roles = []
+                for w in words:
+                    if w in role_map:
+                        detected_roles.append(role_map[w])
+                
+                # Simple heuristic: Ambil yang pertama deteksi, atau 'Ayah' kalau ada kata 'suami'
+                if detected_roles:
+                    role = detected_roles[0] 
+                else:
+                    role = "Keluarga" # Default
+
+                # 2. Tentukan Nama
+                # Strategi: Cari kata setelah marker ("bernama", "namanya", "nama")
+                markers = ["bernama", "namanya", "nama", "panggil"]
+                
+                for i, word in enumerate(words):
+                    if word in markers and (i+1) < len(words):
+                         candidate = words[i+1]
+                         # Filter kata umum
+                         if candidate not in ["seorang", "adalah", "itu", "dan", "saya", "yang"]:
+                             name = candidate.title()
+                             break
+                             
+                if name:
+                    self.memory.add_member(role, name, "0000-00-00")
+                    return f"Salam kenal {role} {name}, data sudah tersimpan.", []
+            except Exception as e:
+                print(f"Error parsing manual: {e}")
+                pass
+        
         # 1. Cek Catat Keuangan
         if "catat beli" in text_lower:
             try:

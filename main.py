@@ -106,7 +106,15 @@ class HanaHeadless:
 
     def process_interaction(self, user_text):
         # print(f"User (Heard): {user_text}")
-        print(f"[Hana Berpikir]:")
+        # ASCII Art: Hana Berpikir (Muslimah Style)
+        print(r"""
+       .---.
+      /     \  o O ( ... )
+     |  o o  |
+     |   ^   |
+      \  -  /
+       '---' 
+        """)
         
         # 1. Kirim ke Brain (Ollama)
         response, actions = self.brain.process_input(user_text)
