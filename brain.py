@@ -1,139 +1,181 @@
 import os
-import sys
 import json
 import datetime
+import subprocess
+import sqlite3
 
-# --- KONFIGURASI DAN DEPENDENSI ---
-# Pastikan library 'openai' terinstall: pip install openai
-try:
-    import openai
-except ImportError:
-    print("Modul 'openai' belum terinstall. Jalankan: pip install openai")
-    # Untuk demonstrasi tanpa API key, kita akan menggunakan mock response jika error
-    openai = None
-
-# API KEY (Sebaiknya gunakan environment variable)
-API_KEY = os.getenv("OPENAI_API_KEY", "sk-placeholder-isi-dengan-api-key-anda")
-
-# --- SYSTEM PROMPT (OTAK HANA) ---
+# --- KONFIGURASI MODEL & CONSTANTS ---
+OLLAMA_MODEL = "tinyllama"  # atau "phi3:mini"
 SYSTEM_PROMPT = """
 ### ROLE
-Kamu adalah "Hana", Digital Asisten Simple Untuk Keluarga Muslim yang bersemayam di dalam CACube.
-Kamu dikembangkan untuk menjadi bagian dari keluarga, seperti kakak atau teman belajar yang hangat.
+Kamu adalah "Hana", Digital Asisten Simple Untuk Keluarga Muslim di dalam CACube.
+Karakter: Ramah, sabar, cerdas, religius namun modern.
+Bahasa: Bahasa Indonesia. Jawab SINGKAT (2-3 kalimat).
+Jika user minta kendali hardware, akhiri dengan tag: [ACTION:LIGHT_ON], [ACTION:LIGHT_OFF], dll.
 
-### PERSONA
-- **Karakter**: Ramah, sabar, cerdas, religius namun modern.
-- **Bahasa**: Bahasa Indonesia yang santun. Gunakan "Assalamualaikum" saat menyapa dan "Barakallah" atau doa yang relevan saat menutup.
-- **Gaya Bicara**: Hangat, menyesuaikan dengan usia lawan bicara (misal: lebih ceria pada anak-anak, lebih hormat pada orang tua).
-
-### KNOWLEDGE & CAPABILITIES
-1. **Profil Keluarga**: Kamu mengenali anggota keluarga (Ayah, Ibu, Anak) beserta tanggal lahir mereka untuk menyesuaikan interaksi.
-2. **Manajemen Ibadah**: Mengingatkan waktu shalat, hafalan Al-Qur'an, dan ibadah harian.
-3. **Edukasi Islam**: Mampu menceritakan kisah Nabi & Rasul, hikmah, serta menjadi ensiklopedia Islam dasar.
-4. **Smart Home**: Mengontrol fitur fisik CACube (Lampu tidur, Alarm).
-5. **Keuangan**: Membantu mencatat keuangan keluarga secara sederhana.
-
-### OPERATIONAL RULES
-1. **BRIEFNESS**: Respon padat dan ringkas (2-3 kalimat) karena diucapkan via TTS, kecuali diminta bercerita (kisah nabi, dll).
-2. **NO HALLUCINATION**: Jika tidak tahu dalil pasti, sarankan bertanya pada Ustadz. Jangan mengarang hadits.
-3. **IOT COMMANDS**: Jika user meminta tindakan fisik, akhiri respon verbal dengan tag aksi:
-   - Nyalakan lampu: `[ACTION:LIGHT_ON]`
-   - Matikan lampu: `[ACTION:LIGHT_OFF]`
-   - Set Alarm: `[ACTION:SET_ALARM:HH:MM]`
-4. **MEMORY**: Ingatlah data keluarga yang diberikan user.
-
-### CONTEXT SAAT INI
-Lokasi: Cileunyi, Jawa Barat.
+### KNOWLEDGE
+Kamu memiliki akses ke data keluarga (nama, tanggal lahir) dan data keuangan yang tersimpan di database.
 """
 
-# --- KELAS MEMORI KELUARGA ---
+# --- KELAS MEMORI KELUARGA (SQLite Version) ---
 class FamilyMemory:
-    def __init__(self, filename="family_data.json"):
-        self.filename = filename
-        self.data = self._load_data()
+    def __init__(self, db_name="hana_memory.db"):
+        self.db_name = db_name
+        self._init_db()
 
-    def _load_data(self):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f:
-                    return json.load(f)
-            except:
-                return {"members": [], "finance_log": []}
-        return {"members": [], "finance_log": []}
+    def _get_conn(self):
+        return sqlite3.connect(self.db_name)
 
-    def save_data(self):
-        with open(self.filename, 'w') as f:
-            json.dump(self.data, f, indent=2)
+    def _init_db(self):
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        # Tabel Anggota Keluarga
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS family_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                name TEXT NOT NULL,
+                birthdate TEXT
+            )
+        ''')
+        
+        # Tabel Keuangan
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS finance_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                description TEXT NOT NULL,
+                amount REAL NOT NULL,
+                type TEXT DEFAULT 'expense'
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
 
     def add_member(self, role, name, birthdate):
-        self.data["members"].append({
-            "role": role,
-            "name": name,
-            "birthdate": birthdate
-        })
-        self.save_data()
-        return f"Data {role} atas nama {name} berhasil disimpan."
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO family_members (role, name, birthdate) VALUES (?, ?, ?)", 
+                           (role, name, birthdate))
+            conn.commit()
+            conn.close()
+            return f"Data {role} atas nama {name} berhasil disimpan ke database."
+        except Exception as e:
+            return f"Gagal menyimpan data: {e}"
 
     def add_finance_log(self, description, amount, type="expense"):
-        self.data["finance_log"].append({
-            "date": str(datetime.date.today()),
-            "desc": description,
-            "amount": amount,
-            "type": type
-        })
-        self.save_data()
-        return f"Catatan {type} sebesar {amount} untuk {description} berhasil disimpan."
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            today = str(datetime.date.today())
+            cursor.execute("INSERT INTO finance_log (date, description, amount, type) VALUES (?, ?, ?, ?)", 
+                           (today, description, amount, type))
+            conn.commit()
+            conn.close()
+            return f"Catatan keuangan berhasil disimpan."
+        except Exception as e:
+            return f"Gagal mencatat keuangan: {e}"
 
     def get_context_string(self):
-        # Meringkas data keluarga untuk disuapkan ke LLM agar Hana "ingat"
-        members = ", ".join([f"{m['role']}: {m['name']} ({m['birthdate']})" for m in self.data["members"]])
-        return f"Data Keluarga: [{members}]" if members else "Data Keluarga: Belum ada data."
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        # Ambil Data Keluarga
+        cursor.execute("SELECT role, name, birthdate FROM family_members")
+        rows = cursor.fetchall()
+        
+        conn.close()
+        
+        if not rows:
+            return "Data Keluarga: Belum ada data."
+            
+        members_str = ", ".join([f"{r[0]}: {r[1]} (Lahir: {r[2]})" for r in rows])
+        return f"Data Keluarga: [{members_str}]"
 
-# --- KELAS OTAK HANA ---
+# --- KELAS OTAK HANA (Offline Version via Ollama) ---
 class HanaBrain:
     def __init__(self):
         self.memory = FamilyMemory()
-        self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
-        if openai:
-            openai.api_key = API_KEY
+        
+    def _ask_ollama(self, prompt, context_text):
+        # Menggunakan subprocess untuk memanggil Ollama secara lokal
+        full_prompt = f"System: {SYSTEM_PROMPT}\nContext: {context_text}\nUser: {prompt}\nAssistant:"
+        
+        try:
+            # Escape quote untuk command line argument yang aman
+            safe_prompt = full_prompt.replace('"', '\\"')
+            
+            # Command ollama run
+            command = f'ollama run {OLLAMA_MODEL} "{safe_prompt}"'
+            
+            # Eksekusi dengan timeout agar tidak hang
+            # stderr=subprocess.STDOUT menggabungkan error ke output untuk debugging
+            result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, timeout=5)
+            return result.decode('utf-8').strip()
+        except subprocess.TimeoutExpired:
+            print("[Info] Ollama timeout. Beralih ke Mock.")
+            return self._mock_fallback(prompt)
+        except FileNotFoundError:
+            return self._mock_fallback(prompt)
+        except subprocess.CalledProcessError as e:
+            output = e.output.decode()
+            # Jika command not found (di windows kadang beda behavior), switch ke mock
+            if "not recognized" in output or "not found" in output or "command not found" in output:
+                print(f"[Info] Ollama tidak ditemukan, beralih ke Mode Demo Mock.")
+                return self._mock_fallback(prompt)
+            return f"Maaf, otak saya (Ollama) sedang error: {output}"
+        except Exception as e:
+            return f"Error sistem: {str(e)}"
+
+    def _mock_fallback(self, prompt):
+        # Fallback sederhana untuk demo tanpa Ollama
+        prompt = prompt.lower()
+        if "siapa" in prompt:
+            return "Saya Hana (Mode Demo), asisten keluarga muslim."
+        if "lampu" in prompt:
+            return "Baik, lampu saya atur. [ACTION:LIGHT_SWITCH]"
+        return "Maaf saya dalam Mode Demo tanpa Ollama. Saya mendengarkan: " + prompt
+
 
     def process_input(self, user_text):
-        # 1. Cek perintah khusus (Simpel Logic sebelum ke LLM untuk efisiensi)
-        # Contoh: "Saya Ayah, nama saya Budi, lahir 1980-01-01" -> Logic parsing sederhana
-        # Disini kita serahkan ke LLM untuk natural language, tapi kita inject konteks memori.
+        print(f"\n[Brain] Berpikir untuk input: {user_text}")
         
-        current_context = self.memory.get_context_string()
+        # 1. Cek Logic Sederhana / Hardcoded
+        text_lower = user_text.lower()
         
-        # Tambahkan pesan user ke history
-        full_input = f"[Context: {current_context}] User: {user_text}"
-        self.history.append({"role": "user", "content": full_input})
+        # CONTOH LOGIC INSERT MANUAL (Simulasi parser perintah simpan data)
+        # "Saya ayah namanya budi lahir 1980" (Sangat simplifikasi)
+        if "nama saya" in text_lower and "ayah" in text_lower:
+             # Disini idealnya pakai Regex atau LLM extraction, kita hardcode demo
+             # Asumsi user bilang: "Saya Ayah nama saya Budi"
+             self.memory.add_member("Ayah", "Budi", "1980-01-01")
+             return "Salam kenal Ayah Budi, data Anda sudah saya simpan.", []
 
-        print(f"\nScanning Input: {user_text}...")
+        if "catat beli" in text_lower:
+             # Contoh: "Catat beli beras 50000"
+             # Simplifikasi parse
+             try:
+                 parts = text_lower.split(" ")
+                 amount = [int(s) for s in parts if s.isdigit()][0]
+                 item = text_lower.replace(str(amount), "").replace("catat beli", "").strip()
+                 self.memory.add_finance_log(f"Beli {item}", amount)
+                 return f"Siap, pengeluaran {amount} untuk {item} sudah dicatat.", []
+             except:
+                 pass
 
-        # 2. Panggil LLM
-        response_text = ""
-        try:
-            if openai and API_KEY != "sk-placeholder-isi-dengan-api-key-anda":
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo", # Atau gpt-4
-                    messages=self.history
-                )
-                response_text = response.choices[0].message['content']
-            else:
-                # MOCK RESPONSE jika tidak ada API Key
-                response_text = self._mock_brain_response(user_text)
-        except Exception as e:
-            response_text = f"Maaf, sirkuit saya sedang bermasalah. ({str(e)})"
+        if "jadwal shalat" in text_lower:
+            return "Untuk kepastian, silakan cek jam shalat CACube. Biasanya Dzuhur sekitar jam 12.", []
+            
+        # 2. Ambil Konteks Memori dari SQLite
+        context = self.memory.get_context_string()
 
-        # 3. Proses Output & Actions
-        self.history.append({"role": "assistant", "content": response_text})
+        # 3. Lempar ke Ollama
+        response_text = self._ask_ollama(user_text, context)
         
-        # Cek apakah ada request penyimpanan data (Logic sederhana untuk demo)
-        if "catat keuangan" in user_text.lower():
-            # Di implementasi nyata, LLM haruse mengekstrak ini menjadi JSON
-            self.memory.add_finance_log("Pengeluaran Umum", 50000) 
-            response_text += "\n(Sistem: Data keuangan tersimpan otomatis)"
-
+        # 4. Parse Actions
         verbal_response, actions = self._parse_actions(response_text)
         
         return verbal_response, actions
@@ -141,53 +183,24 @@ class HanaBrain:
     def _parse_actions(self, text):
         actions = []
         if "[ACTION:" in text:
-            # Split teks dan command
             parts = text.split("[ACTION:")
             verbal = parts[0].strip()
-            command = parts[1].split("]")[0]
-            actions.append(command)
+            if "]" in parts[1]:
+                command = parts[1].split("]")[0]
+                actions.append(command)
             return verbal, actions
         return text, []
 
-    def _mock_brain_response(self, text):
-        # Logika "Bodoh" / Rule-based untuk demo tanpa internet/API Key
-        text = text.lower()
-        if "assalam" in text:
-            return "Wa'alaikumussalam, keluarga CACube yang dirahmati Allah. Ada yang bisa Hana bantu?"
-        elif "kenalan" in text or "siapa kamu" in text:
-            return "Saya Hana, asisten digital untuk keluarga muslim. Saya bisa bantu ingatkan shalat, catat keuangan, atau bacakan kisah nabi."
-        elif "lampu" in text and "nyala" in text:
-            return "Baik, lampu tidur saya nyalakan. [ACTION:LIGHT_ON]"
-        elif "matikan" in text:
-            return "Siap, lampu dimatikan. [ACTION:LIGHT_OFF]"
-        elif "kisah" in text:
-            return "Tentu. Salah satu kisah teladan adalah kesabaran Nabi Ayyub AS saat diuji dengan penyakit..."
-        else:
-            return "Maaf, Hana belum tersambung ke Cloud Brain (OpenAI API key belum diset). Tapi Hana mendengarmu!"
-
-# --- MAIN LOOP (SIMULASI) ---
+# Test block
 if __name__ == "__main__":
-    hana = HanaBrain()
+    print("Mencoba koneksi ke Database & Ollama...")
+    bot = HanaBrain()
     
-    print("--------------------------------------------------")
-    print("HANA AI - CACube Initialization")
-    print("--------------------------------------------------")
-    print("Tip: Ketik 'keluar' untuk berhenti.")
-    print("Tip: Coba ketik 'Nyalakan lampu' atau 'Assalamualaikum'")
+    # Test Simpan Data
+    print(bot.memory.add_member("Anak", "Fatih", "2015-05-20"))
     
-    while True:
-        try:
-            user_input = input("\n[Anda]: ")
-            if user_input.lower() in ["keluar", "exit"]:
-                print("[Hana]: Assalamualaikum, sampai jumpa lagi!")
-                break
-            
-            response, actions = hana.process_input(user_input)
-            
-            print(f"[Hana]: {response}")
-            if actions:
-                print(f"[SYSTEM HARDWARE]: Executing {actions}")
-                
-        except KeyboardInterrupt:
-            print("\n[Hana]: Terputus paksa. Assalamualaikum.")
-            break
+    # Test Baca Data via Context
+    print(f"Context saat ini: {bot.memory.get_context_string()}")
+    
+    res, act = bot.process_input("Siapa saja anggota keluarga ini?")
+    print(f"Response: {res}")

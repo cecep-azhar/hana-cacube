@@ -1,0 +1,4 @@
+vosk
+pyaudio
+# ollama library is optional if using subprocess, but 'ollama' package exists for cleaner code. 
+# sticking to subprocess as requested or standard requests logic.
