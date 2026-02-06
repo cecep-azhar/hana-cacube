@@ -102,31 +102,55 @@ class FamilyMemory:
         except Exception as e:
             return f"Gagal simpan DB: {e}"
 
-    def add_finance_log(self, description, amount):
+    def add_finance_log(self, description, amount, type="expense"):
         try:
             conn = self._get_conn()
             cursor = conn.cursor()
             today = str(datetime.date.today())
-            cursor.execute("INSERT INTO finance_log (date, description, amount) VALUES (?, ?, ?)", 
-                           (today, description, amount))
+            cursor.execute("INSERT INTO finance_log (date, description, amount, type) VALUES (?, ?, ?, ?)", 
+                           (today, description, amount, type))
             conn.commit()
             conn.close()
-            return "Catatan keuangan tersimpan."
+            return f"Catatan {type} tersimpan."
         except Exception as e:
             return f"Gagal catat uang: {e}"
 
     def get_context_string(self):
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT role, name, birthdate, gender, hobbies, notes FROM family_members")
+        
+        # 1. Data Keluarga
+        cursor.execute("SELECT role, name, birthdate, gender, hobbies FROM family_members")
         rows = cursor.fetchall()
-        conn.close()
         
         if not rows:
-            return "Data Keluarga: (Kosong)"
+            family_str = "Data Keluarga: (Kosong)"
+        else:
+            members = [f"- {r[0]} {r[1]} ({r[3]}, Hobi: {r[4]})" for r in rows]
+            family_str = "Data Keluarga:\n" + "\n".join(members)
+
+        # 2. Data Keuangan (Summary)
+        cursor.execute("SELECT type, amount, description FROM finance_log")
+        logs = cursor.fetchall()
         
-        members = [f"{r[0]}: {r[1]} ({r[2]})" for r in rows]
-        return "Data Keluarga: " + ", ".join(members)
+        total_income = sum([x[1] for x in logs if x[0] == 'income'])
+        total_expense = sum([x[1] for x in logs if x[0] == 'expense'])
+        balance = total_income - total_expense
+        
+        # Ambil 3 Transaksi Terakhir
+        cursor.execute("SELECT date, description, amount, type FROM finance_log ORDER BY id DESC LIMIT 3")
+        last_tx = cursor.fetchall()
+        tx_str = ", ".join([f"{t[1]} ({t[3]}: {t[2]})" for t in last_tx])
+        
+        finance_str = f"""
+Data Keuangan:
+- Total Pemasukan: Rp{total_income:,.0f}
+- Total Pengeluaran: Rp{total_expense:,.0f}
+- Sisa Saldo: Rp{balance:,.0f}
+- Transaksi Terakhir: {tx_str}
+"""
+        conn.close()
+        return f"{family_str}\n\n{finance_str}"
 
 # --- 2. OTAK HANA (Ollama Integration) ---
 class HanaBrain:
@@ -266,21 +290,67 @@ Jawaban (sebagai Hana):"""
                 print(f"Error parsing manual: {e}")
                 pass
         
-        # 1. Cek Catat Keuangan
-        if "catat beli" in text_lower:
+                pass
+        
+        # 1. Cek Catat Keuangan Smart
+        # Keyword triggers: "catat", "beli", "jajan", "bayar", "pemasukan", "pengeluaran", "gaji"
+        finance_keywords = ["catat", "beli", "jajan", "bayar", "pemasukan", "pengeluaran", "gaji", "uang"]
+        if any(w in text_lower for w in finance_keywords):
             try:
-                # Ambil angka pertama yang ditemukan
-                parts = text_lower.split()
-                amount = next((int(s) for s in parts if s.isdigit()), None)
+                # A. Tentukan Tipe (Income/Expense)
+                ftype = "expense" # Default pengeluaran
+                if "pemasukan" in text_lower or "gaji" in text_lower or "dapat uang" in text_lower:
+                    ftype = "income"
                 
-                if amount:
-                    item = text_lower.replace(str(amount), "").replace("catat beli", "").strip()
-                    msg = self.memory.add_finance_log(f"Beli {item}", amount)
-                    return f"Siap, {msg} ({item}: Rp{amount})", []
-                else:
-                    return "Berapa harganya? Sebutkan angkanya ya.", []
+                # B. Cari Angka (Support "100 ribu", "1.5 juta")
+                # Split text, cari digit
+                parts = text_lower.split()
+                amount = 0
+                
+                for i, word in enumerate(parts):
+                    # Bersihkan Rp/titik/koma
+                    clean_word = word.replace("rp", "").replace(".", "").replace(",", "")
+                    if clean_word.isdigit():
+                        val = int(clean_word)
+                        # Cek multiplier di kata berikutnya (ribu, juta)
+                        if i + 1 < len(parts):
+                            next_word = parts[i+1]
+                            if "ribu" in next_word or "rb" in next_word:
+                                val *= 1000
+                            elif "juta" in next_word or "jt" in next_word:
+                                val *= 1000000
+                        amount = val
+                        break # Ambil angka pertama aja
+                
+                if amount > 0:
+                    # C. Cari Deskripsi (Hapus angka & keyword)
+                    # Cara simple: hapus angka yang ketemu, hapus keyword trigger
+                    desc_text = text_lower
+                    triggers = finance_keywords + ["ribu", "juta", "rb", "jt", "rp", str(amount)]
+                    for t in triggers:
+                         desc_text = desc_text.replace(t, "")
+                    
+                    desc_text = desc_text.strip()
+                    if not desc_text: desc_text = "Umum"
+                    
+                    msg = self.memory.add_finance_log(desc_text.title(), amount, ftype)
+                    return f"Siap, {msg} ({desc_text}: Rp{amount:,.0f})", []
             except Exception as e:
-                print(f"Error parsing: {e}")
+                print(f"Error parsing finance: {e}")
+                pass
+        
+        # 2. Cek Tanya Saldo Manual (Cepat)
+        if "uang saya" in text_lower or "saldo" in text_lower or "sisa uang" in text_lower:
+            conn = self.memory._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT type, amount FROM finance_log")
+            logs = cursor.fetchall()
+            conn.close()
+            
+            income = sum([x[1] for x in logs if x[0] == 'income'])
+            expense = sum([x[1] for x in logs if x[0] == 'expense'])
+            bal = income - expense
+            return f"Laporan Keuangan: Total Pemasukan Rp{income:,.0f}, Pengeluaran Rp{expense:,.0f}. Sisa Saldo saat ini: Rp{bal:,.0f}", []
 
         # 2. Cek Jadwal Shalat (Hardcode sementara)
         if "jadwal shalat" in text_lower:
