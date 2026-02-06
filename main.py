@@ -31,7 +31,8 @@ def hana_speak_offline(text):
     
     # Untuk testing di Windows (tanpa piper/aplay), kita hanya print command
     if sys.platform == "win32":
-        print(f"[MOCK AUDIO]: {cmd}")
+        # print(f"[MOCK AUDIO]: {cmd}")
+        pass
     else:
         os.system(cmd)
 
@@ -96,7 +97,7 @@ class HanaHeadless:
             else:
                 # Fallback ke Text Input (misal testing di PC tanpa Mic/Vosk)
                 try:
-                    text_input = input("\n[Ketik Perintah]: ")
+                    text_input = input("\n[Kamu]: ")
                     if text_input.lower() in ['exit', 'keluar']:
                         break
                     self.process_interaction(text_input)
@@ -104,7 +105,8 @@ class HanaHeadless:
                     break
 
     def process_interaction(self, user_text):
-        print(f"User (Heard): {user_text}")
+        # print(f"User (Heard): {user_text}")
+        print(f"[Hana Berpikir]:")
         
         # 1. Kirim ke Brain (Ollama)
         response, actions = self.brain.process_input(user_text)
