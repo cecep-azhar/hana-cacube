@@ -4,6 +4,7 @@ import datetime
 import subprocess
 import sqlite3
 import sys
+import re
 
 # --- KONFIGURASI ---
 # Pastikan model ini sudah di-pull: ollama pull gemma3:270m
@@ -232,9 +233,115 @@ Jawaban (sebagai Hana):"""
         return clean_text, actions
 
     def process_input(self, user_text):
-        text_lower = user_text.lower()
+        text_lower = user_text.lower().strip()
+        words = re.findall(r"[a-z0-9]+", text_lower)
         
         # --- LOGIC MANUAL (Cepat & Tanpa AI) ---
+        role_map = {
+            "ayah": "Ayah", "suami": "Ayah", "bapak": "Ayah",
+            "ibu": "Ibu", "istri": "Ibu", "bunda": "Ibu", "mama": "Ibu",
+            "anak": "Anak", "putra": "Anak", "putri": "Anak"
+        }
+        role_keywords = set(role_map.keys())
+        add_verbs = ["tambah", "tambahkan", "daftarkan", "input", "masukkan", "masukan", "simpan"]
+        question_words = ["siapa", "berapa", "apa", "kapan", "dimana", "di", "mana"]
+        stop_words = {
+            "lapar", "sakit", "capek", "lelah", "baik", "oke", "siap", "sedih", "senang",
+            "saya", "aku", "kami", "kita", "ini", "itu", "ya"
+        }
+
+        def is_question():
+            return "?" in user_text or any(q in words for q in question_words)
+
+        def parse_gender(text):
+            if "laki-laki" in text or "laki laki" in text or "pria" in text:
+                return "Laki-laki"
+            if "perempuan" in text or "wanita" in text:
+                return "Perempuan"
+            return "-"
+
+        def parse_age(text):
+            match = re.search(r"(\d{1,3})\s*tahun", text)
+            if match:
+                return int(match.group(1))
+            return None
+
+        def extract_name_after_role(tokens, role_word):
+            try:
+                idx = tokens.index(role_word)
+            except ValueError:
+                return None
+
+            if idx + 1 < len(tokens) and tokens[idx + 1] in {"saya", "ku", "kami"}:
+                idx += 1
+            if idx + 1 < len(tokens):
+                return " ".join(tokens[idx + 1:]).title()
+            return None
+
+        def extract_name_after_markers(tokens, markers):
+            for i, word in enumerate(tokens):
+                if word in markers and (i + 1) < len(tokens):
+                    candidate = tokens[i + 1]
+                    if candidate not in stop_words:
+                        return " ".join(tokens[i + 1:]).title()
+            return None
+
+        def parse_amount(tokens):
+            for i, tok in enumerate(tokens):
+                if not re.search(r"\d", tok):
+                    continue
+
+                raw = re.sub(r"[^\d.,]", "", tok)
+                if not raw:
+                    continue
+
+                suffix = re.sub(r"[\d.,]", "", tok)
+                suffix = suffix.lower()
+
+                next_word = tokens[i + 1] if i + 1 < len(tokens) else ""
+                multiplier = 1
+                multiplier_word = None
+
+                if suffix in {"ribu", "rb", "k"}:
+                    multiplier = 1000
+                    multiplier_word = suffix
+                elif suffix in {"juta", "jt", "m"}:
+                    multiplier = 1000000
+                    multiplier_word = suffix
+                elif next_word in {"ribu", "rb", "k"}:
+                    multiplier = 1000
+                    multiplier_word = next_word
+                elif next_word in {"juta", "jt", "m"}:
+                    multiplier = 1000000
+                    multiplier_word = next_word
+
+                if raw.count(".") + raw.count(",") >= 2:
+                    num = int(re.sub(r"[.,]", "", raw))
+                else:
+                    if multiplier > 1:
+                        num = float(raw.replace(",", "."))
+                    else:
+                        if "." in raw or "," in raw:
+                            sep = "." if "." in raw else ","
+                            parts = raw.split(sep)
+                            if len(parts[-1]) == 3 and all(p.isdigit() for p in parts):
+                                num = int("".join(parts))
+                            else:
+                                num = float(raw.replace(",", "."))
+                        else:
+                            num = int(raw)
+
+                amount = int(num * multiplier)
+                return amount, tok, multiplier_word
+
+            return 0, None, None
+
+        # 0. Salam & sapaan singkat
+        if any(w in words for w in ["assalamualaikum", "salaam", "salam", "halo", "hai"]):
+            return "Waalaikumsalam. Ada yang bisa saya bantu hari ini?", []
+
+        if any(w in words for w in ["waalaikumsalam", "waalaikumussalam", "walaikumsalam", "walaikumussalam","wslm"]) or any(w.startswith("waalaikum") or w.startswith("walaikum") for w in words):
+            return "Ada yang bisa saya bantu hari ini?", []
         
         # 0. Parsing Identitas (Ayah/Ibu)
         # Mendukung: "Saya suami bernama Cecep" atau "Saya Ibu namanya Rini"
@@ -242,99 +349,215 @@ Jawaban (sebagai Hana):"""
             try:
                 role = None
                 name = None
-                
-                # Mapping kata kunci ke Role Database
-                role_map = {
-                    "ayah": "Ayah", "suami": "Ayah", "bapak": "Ayah",
-                    "ibu": "Ibu", "istri": "Ibu", "bunda": "Ibu", "mama": "Ibu",
-                    "anak": "Anak", "putra": "Anak", "putri": "Anak"
-                }
 
-                # 1. Tentukan Role
-                # Prioritas: Kata role yang muncul SETELAH kata "saya" (e.g. "Saya Suami...")
-                # Jika tidak ada "saya", ambil role pertama yang ketemu.
-                words = text_lower.split()
-                
                 detected_roles = []
                 for w in words:
                     if w in role_map:
                         detected_roles.append(role_map[w])
-                
-                # Simple heuristic: Ambil yang pertama deteksi, atau 'Ayah' kalau ada kata 'suami'
-                if detected_roles:
-                    role = detected_roles[0] 
-                else:
-                    role = "Keluarga" # Default
 
-                # 2. Tentukan Nama
-                # Strategi: Cari kata setelah marker ("bernama", "namanya", "nama")
+                if detected_roles:
+                    role = detected_roles[0]
+                else:
+                    role = "Keluarga"
+
                 markers = ["bernama", "namanya", "nama", "panggil"]
-                
-                for i, word in enumerate(words):
-                    if word in markers and (i+1) < len(words):
-                         candidate = words[i+1]
-                         # Filter kata umum
-                         if candidate not in ["seorang", "adalah", "itu", "dan", "saya", "yang"]:
-                             name = candidate.title()
-                             break
+                name = extract_name_after_markers(words, markers)
                              
                 if name:
-                    # Infer Gender sederhana dari Role
-                    gender = "-"
-                    if role in ["Ayah", "Suami", "Putra", "Kakek"]: gender = "Laki-laki"
-                    elif role in ["Ibu", "Istri", "Putri", "Nenek"]: gender = "Perempuan"
-                    
-                    self.memory.add_member(role, name, birthdate="0000-00-00", gender=gender, hobbies="-")
+                    gender = parse_gender(text_lower)
+                    age = parse_age(text_lower)
+                    notes = f"Umur {age} tahun" if age else "-"
+
+                    if gender == "-":
+                        if role in ["Ayah", "Suami", "Putra", "Kakek"]:
+                            gender = "Laki-laki"
+                        elif role in ["Ibu", "Istri", "Putri", "Nenek"]:
+                            gender = "Perempuan"
+
+                    self.memory.add_member(role, name, birthdate="0000-00-00", gender=gender, hobbies="-", notes=notes)
                     return f"Salam kenal {role} {name}, data lengkapmu sudah saya simpan.", []
             except Exception as e:
                 print(f"Error parsing manual: {e}")
                 pass
-        
+
+        # 0b. Parsing Identitas sederhana: "Saya Cecep" atau "Saya Ayah Cecep"
+        if text_lower.startswith("saya ") and "bernama" not in text_lower and "namanya" not in text_lower:
+            try:
+                if len(words) >= 2:
+                    second = words[1]
+                    if second in role_map and len(words) >= 3:
+                        role = role_map[second]
+                        name = " ".join(words[2:]).title()
+                    elif second not in stop_words:
+                        role = "Keluarga"
+                        name = " ".join(words[1:]).title()
+                    else:
+                        name = None
+
+                    if name:
+                        gender = parse_gender(text_lower)
+                        age = parse_age(text_lower)
+                        notes = f"Umur {age} tahun" if age else "-"
+                        self.memory.add_member(role, name, birthdate="0000-00-00", gender=gender, hobbies="-", notes=notes)
+                        return f"Salam kenal {role} {name}, data lengkapmu sudah saya simpan.", []
+            except Exception as e:
+                print(f"Error parsing simple identity: {e}")
                 pass
+
+        # 0c. Tambah Anggota Keluarga (Command)
+        if any(v in words for v in add_verbs) and not is_question() and not any(w in words for w in ["catat", "beli", "jajan", "bayar", "pemasukan", "pengeluaran", "gaji", "uang", "transfer", "terima", "dapat"]):
+            try:
+                role = None
+                name = None
+
+                for w in words:
+                    if w in role_keywords:
+                        role = role_map[w]
+                        name = extract_name_after_role(words, w)
+                        break
+
+                if not role and "anak saya" in text_lower:
+                    role = "Anak"
+                    name = extract_name_after_role(words, "anak")
+
+                age = parse_age(text_lower)
+                if not role and age is not None and age <= 18:
+                    role = "Anak"
+
+                if not role and words and words[0] in add_verbs:
+                    role = "Anak"
+                    if len(words) > 1 and words[1] not in stop_words:
+                        name = " ".join(words[1:]).title()
+
+                if not role and "anak" not in words and "anak saya" not in text_lower:
+                    return "Peran belum jelas. Contoh: 'Tambahkan anak saya Harun'.", []
+
+                if not role:
+                    return "Peran belum jelas. Contoh: 'Tambahkan anak saya Harun'.", []
+
+                if not name:
+                    return "Nama belum disebutkan. Contoh: 'Tambahkan anak saya Harun'.", []
+
+                gender = parse_gender(text_lower)
+                notes = f"Umur {age} tahun" if age else "-"
+                self.memory.add_member(role, name, birthdate="0000-00-00", gender=gender, hobbies="-", notes=notes)
+                return f"Baik, data {role} {name} sudah saya simpan.", []
+            except Exception as e:
+                print(f"Error parsing add member: {e}")
+                pass
+
+        # 0c1. Hapus Anggota Keluarga
+        if "hapus" in words and not is_question():
+            try:
+                target = " ".join([w for w in words if w not in {"hapus", "data", "anak", "istri", "suami", "ayah", "ibu"}]).title()
+                if not target:
+                    return "Nama yang mau dihapus belum disebutkan.", []
+
+                conn = self.memory._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM family_members WHERE name = ?", (target,))
+                affected = cursor.rowcount
+                conn.commit()
+                conn.close()
+
+                if affected <= 0:
+                    return f"Nama {target} tidak ditemukan di data keluarga.", []
+
+                return f"Baik, data {target} sudah saya hapus dari keluarga.", []
+            except Exception as e:
+                print(f"Error delete member: {e}")
+                pass
+
+        # 0c2. Tambah Anak tanpa kata kerja (mis. "anak saya Harun", "anak saya berikutnya Harun")
+        if "anak saya" in text_lower and not is_question():
+            try:
+                name = None
+                if "bernama" in words:
+                    name = extract_name_after_markers(words, ["bernama"])
+                elif "berikutnya" in words:
+                    name = extract_name_after_markers(words, ["berikutnya"])
+                else:
+                    name = extract_name_after_role(words, "anak")
+
+                if not name:
+                    return "Nama anak belum disebutkan. Contoh: 'anak saya Harun'.", []
+
+                gender = parse_gender(text_lower)
+                age = parse_age(text_lower)
+                notes = f"Umur {age} tahun" if age else "-"
+                self.memory.add_member("Anak", name, birthdate="0000-00-00", gender=gender, hobbies="-", notes=notes)
+                return f"Baik, data Anak {name} sudah saya simpan.", []
+            except Exception as e:
+                print(f"Error parsing add child: {e}")
+                pass
+
+        # 0d. Pertanyaan identitas: "Siapa saya?"
+        if "siapa saya" in text_lower:
+            conn = self.memory._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT role, name FROM family_members WHERE role IN ('Ayah', 'Ibu', 'Keluarga') ORDER BY id DESC LIMIT 1")
+            row = cursor.fetchone()
+            conn.close()
+
+            if not row:
+                return "Aku belum tahu namamu. Coba perkenalkan diri dulu, misalnya: 'Saya Cecep'.", []
+
+            role, name = row
+            if role == "Keluarga":
+                return f"Kamu adalah {name}.", []
+            return f"Kamu adalah {role} {name}.", []
+
+        # 1. Laporan Keuangan (Detail)
+        if "laporan" in words and ("pengeluaran" in words or "pemasukan" in words):
+            conn = self.memory._get_conn()
+            cursor = conn.cursor()
+
+            if "pengeluaran" in words:
+                cursor.execute("SELECT date, description, amount FROM finance_log WHERE type = 'expense' ORDER BY id DESC")
+                label = "Pengeluaran"
+            else:
+                cursor.execute("SELECT date, description, amount FROM finance_log WHERE type = 'income' ORDER BY id DESC")
+                label = "Pemasukan"
+
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                return f"Belum ada {label.lower()} yang tersimpan.", []
+
+            lines = [f"{label} (Terbaru -> Lama):"]
+            for date, desc, amount in rows:
+                lines.append(f"- {date}: {desc} (Rp{amount:,.0f})")
+
+            return "\n".join(lines), []
         
         # 1. Cek Catat Keuangan Smart
         # Keyword triggers: "catat", "beli", "jajan", "bayar", "pemasukan", "pengeluaran", "gaji"
-        finance_keywords = ["catat", "beli", "jajan", "bayar", "pemasukan", "pengeluaran", "gaji", "uang"]
-        if any(w in text_lower for w in finance_keywords):
+        finance_keywords = ["catat", "beli", "jajan", "bayar", "pemasukan", "pengeluaran", "gaji", "uang", "transfer", "terima", "dapat"]
+        if any(w in words for w in finance_keywords) and not is_question():
             try:
-                # A. Tentukan Tipe (Income/Expense)
-                ftype = "expense" # Default pengeluaran
+                ftype = "expense"
                 if "pemasukan" in text_lower or "gaji" in text_lower or "dapat uang" in text_lower:
                     ftype = "income"
                 
-                # B. Cari Angka (Support "100 ribu", "1.5 juta")
-                # Split text, cari digit
-                parts = text_lower.split()
-                amount = 0
-                
-                for i, word in enumerate(parts):
-                    # Bersihkan Rp/titik/koma
-                    clean_word = word.replace("rp", "").replace(".", "").replace(",", "")
-                    if clean_word.isdigit():
-                        val = int(clean_word)
-                        # Cek multiplier di kata berikutnya (ribu, juta)
-                        if i + 1 < len(parts):
-                            next_word = parts[i+1]
-                            if "ribu" in next_word or "rb" in next_word:
-                                val *= 1000
-                            elif "juta" in next_word or "jt" in next_word:
-                                val *= 1000000
-                        amount = val
-                        break # Ambil angka pertama aja
-                
-                if amount > 0:
-                    # C. Cari Deskripsi (Hapus angka & keyword)
-                    # Cara simple: hapus angka yang ketemu, hapus keyword trigger
-                    desc_text = text_lower
-                    triggers = finance_keywords + ["ribu", "juta", "rb", "jt", "rp", str(amount)]
-                    for t in triggers:
-                         desc_text = desc_text.replace(t, "")
-                    
-                    desc_text = desc_text.strip()
-                    if not desc_text: desc_text = "Umum"
-                    
-                    msg = self.memory.add_finance_log(desc_text.title(), amount, ftype)
-                    return f"Siap, {msg} ({desc_text}: Rp{amount:,.0f})", []
+                amount, num_token, mult_token = parse_amount(words)
+
+                if amount <= 0:
+                    return "Nominalnya berapa? Contoh: 'catat jajan 10 ribu'.", []
+
+                drop_words = set(finance_keywords + ["ribu", "juta", "rb", "jt", "k", "m", "rp", "rupiah", "hari", "ini", "buat", "untuk", "ke"])
+                if num_token:
+                    drop_words.add(num_token)
+                if mult_token:
+                    drop_words.add(mult_token)
+
+                desc_tokens = [w for w in words if w not in drop_words]
+                desc_text = " ".join(desc_tokens).strip()
+                if not desc_text:
+                    desc_text = "Umum"
+
+                msg = self.memory.add_finance_log(desc_text.title(), amount, ftype)
+                return f"Siap, {msg} ({desc_text}: Rp{amount:,.0f})", []
             except Exception as e:
                 print(f"Error parsing finance: {e}")
                 pass
@@ -350,9 +573,98 @@ Jawaban (sebagai Hana):"""
             income = sum([x[1] for x in logs if x[0] == 'income'])
             expense = sum([x[1] for x in logs if x[0] == 'expense'])
             bal = income - expense
-            return f"Laporan Keuangan: Total Pemasukan Rp{income:,.0f}, Pengeluaran Rp{expense:,.0f}. Sisa Saldo saat ini: Rp{bal:,.0f}", []
+            return (
+                "Laporan Keuangan:\n"
+                f"- Total Pemasukan: Rp{income:,.0f}\n"
+                f"- Total Pengeluaran: Rp{expense:,.0f}\n"
+                f"- Sisa Saldo: Rp{bal:,.0f}"
+            ), []
 
-        # 2. Cek Jadwal Shalat (Hardcode sementara)
+        # 2b. Cek Transaksi Terakhir
+        if "terakhir" in words and ("transaksi" in words or "jajan" in words or "pengeluaran" in words or "pemasukan" in words):
+            conn = self.memory._get_conn()
+            cursor = conn.cursor()
+
+            if "pemasukan" in words:
+                cursor.execute("SELECT date, description, amount FROM finance_log WHERE type = 'income' ORDER BY id DESC LIMIT 1")
+                label = "Pemasukan"
+            elif "jajan" in words or "pengeluaran" in words:
+                cursor.execute("SELECT date, description, amount FROM finance_log WHERE type = 'expense' ORDER BY id DESC LIMIT 1")
+                label = "Pengeluaran"
+            else:
+                cursor.execute("SELECT date, description, amount, type FROM finance_log ORDER BY id DESC LIMIT 1")
+                row = cursor.fetchone()
+                conn.close()
+
+                if not row:
+                    return "Belum ada transaksi yang tersimpan.", []
+
+                date, desc, amount, ftype = row
+                label = "Pemasukan" if ftype == "income" else "Pengeluaran"
+                return f"Transaksi terakhir: {label} {desc} (Rp{amount:,.0f}) pada {date}.", []
+
+            row = cursor.fetchone()
+            conn.close()
+
+            if not row:
+                return f"Belum ada {label.lower()} yang tersimpan.", []
+
+            date, desc, amount = row
+            return f"{label} terakhir: {desc} (Rp{amount:,.0f}) pada {date}.", []
+
+        # 2c. Cek Tanya Total Pengeluaran
+        if "pengeluaran" in text_lower and ("total" in text_lower or "semua" in text_lower or is_question()):
+            conn = self.memory._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT amount FROM finance_log WHERE type = 'expense'")
+            rows = cursor.fetchall()
+            conn.close()
+
+            total_expense = sum([x[0] for x in rows])
+            return f"Total pengeluaran kamu saat ini: Rp{total_expense:,.0f}", []
+
+        # 2d. Cek Tanya Total Pemasukan
+        if "pemasukan" in text_lower and ("total" in text_lower or "semua" in text_lower or is_question()):
+            conn = self.memory._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT amount FROM finance_log WHERE type = 'income'")
+            rows = cursor.fetchall()
+            conn.close()
+
+            total_income = sum([x[0] for x in rows])
+            return f"Total pemasukan kamu saat ini: Rp{total_income:,.0f}", []
+
+        # 2e. Cek Tanya Anak di Keluarga
+        if "anak" in text_lower and ("anak saya" in text_lower or "anak di keluarga" in text_lower or is_question()):
+            conn = self.memory._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM family_members WHERE role = 'Anak'")
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                return "Data anak belum ada di database.", []
+
+            names = ", ".join([r[0] for r in rows])
+            return f"Anak di keluarga ini: {names}.", []
+
+        # 2f. Cek Tanya Peran Keluarga Lain
+        if "siapa" in text_lower or (is_question() and any(k in words for k in role_keywords)):
+            for key, role in role_map.items():
+                if key in words:
+                    conn = self.memory._get_conn()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM family_members WHERE role = ?", (role,))
+                    rows = cursor.fetchall()
+                    conn.close()
+
+                    if not rows:
+                        return f"Data {role.lower()} belum ada di database.", []
+
+                    names = ", ".join([r[0] for r in rows])
+                    return f"{role} di keluarga ini: {names}.", []
+
+        # 3. Cek Jadwal Shalat (Hardcode sementara)
         if "jadwal shalat" in text_lower:
             return "Dzuhur hari ini jam 12:05. Jangan lupa wudhu ya.", []
 
